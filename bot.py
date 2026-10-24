@@ -56,6 +56,10 @@ GH_HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28"
 }
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+}
+
 
 def sanitize_filename(name: str) -> str:
     """پاکسازی نام فایل برای جلوگیری از خراب شدن لینک دانلود"""
@@ -148,7 +152,6 @@ def parse_batch_args(args: list[str]) -> tuple[bool, str | None, str]:
     if args[0].lower() != "zip":
         return False, None, sanitize_filename(" ".join(args))
 
-    # حالت zip فعال است
     rem = args[1:]
     if not rem:
         return True, None, default_name
@@ -159,10 +162,8 @@ def parse_batch_args(args: list[str]) -> tuple[bool, str | None, str]:
         return True, pwd, name
 
     if len(rem) == 1:
-        # اگر فقط یک کلمه بعد از zip آمد، آن را نام در نظر بگیر (مگر اینکه کاربر با -p رمز بدهد)
         return True, None, sanitize_filename(rem[0])
 
-    # اگر ۲ کلمه یا بیشتر آمد: اولی پسورد، بقیه نام فایل زیپ
     pwd = rem[0]
     name = sanitize_filename(" ".join(rem[1:]))
     return True, pwd, name
@@ -179,7 +180,6 @@ async def create_store_zip_volumes(
     """
     بسته‌بندی در حالت Store (-mx=0 بدون فشار به CPU) با فرمت استاندارد ZIP
     که مستقیماً در WinRAR و 7-Zip باز می‌شود.
-    اگر حجم بیش از 1900MB باشد، خودکار به .zip.001, .zip.002 تقسیم می‌شود.
     """
     clean_base = re.sub(r'\.(zip|7z|rar)$', '', base_archive_name, flags=re.IGNORECASE)
     archive_base_path = os.path.join(work_dir, f"{clean_base}.zip")
@@ -216,7 +216,6 @@ async def create_store_zip_volumes(
     if proc.returncode != 0:
         raise Exception(f"خطا در ساخت آرشیو زیپ: {stderr.decode('utf-8', errors='ignore')[-300:]}")
 
-    # حذف فایل‌های خام اولیه بلافاصله پس از ساخت آرشیو برای آزادسازی فضای دیسک
     for p in target_paths:
         if os.path.exists(p):
             try:
@@ -224,12 +223,10 @@ async def create_store_zip_volumes(
             except Exception:
                 pass
 
-    # پیدا کردن پارت‌های تولید شده (.zip یا .zip.001, .zip.002 ...)
     parts = sorted(glob.glob(f"{archive_base_path}*"))
     if not parts:
         raise Exception("فایل آرشیو خروجی یافت نشد.")
 
-    # اگر فقط ۱ پارت `.zip.001` ساخته شده بود، پسوند `.001` را بردار تا یک `.zip` عادی شود
     if len(parts) == 1 and parts[0].endswith(".zip.001"):
         normal_zip = parts[0][:-4]
         os.rename(parts[0], normal_zip)
@@ -311,7 +308,7 @@ async def async_file_sender(local_path: str, total_size: int, status_msg: Messag
 
 
 async def create_github_release(http: httpx.AsyncClient, title: str, body: str, status_msg: Message) -> tuple[int, str, str, str]:
-    """ایجاد یک Release جدید در گیت‌هاب و بازگرداندن (release_id, upload_url, tag_name, html_url)"""
+    """ایجاد یک Release جدید در گیت‌هاب"""
     tag_time = datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:19]
     tag_name = f"v{tag_time}"
 
@@ -342,7 +339,7 @@ async def upload_asset_to_release(
     status_msg: Message,
     part_label: str = ""
 ) -> tuple[int, str, int]:
-    """آپلود یک فایل (Asset) داخل یک Release مشخص و حذف فوری آن از دیسک سرور"""
+    """آپلود یک فایل داخل Release و حذف فوری آن از دیسک سرور"""
     file_size = os.path.getsize(local_path)
     upload_headers = {
         **GH_HEADERS,
@@ -360,7 +357,6 @@ async def upload_asset_to_release(
     if up_resp.status_code != 201:
         raise Exception(f"خطا در آپلود `{asset_name}`: {up_resp.text}")
 
-    # حذف فوری پارت آپلود شده از دیسک سرور برای جلوگیری از پر شدن هارد
     if os.path.exists(local_path):
         try:
             os.remove(local_path)
@@ -384,23 +380,18 @@ async def upload_links_txt_asset(http: httpx.AsyncClient, upload_url: str, work_
 
 
 async def process_and_upload_single_target(local_path: str, status_msg: Message):
-    """
-    بررسی حجم فایل تک، فشرده‌سازی/پارت‌بندی خودکار در صورت بالای 2GB بودن یا فعال بودن /zip،
-    آپلود در گیت‌هاب همراه با links.txt و نمایش لینک ریپو/ریلیز.
-    """
+    """پردازش فایل تکی، پارت‌بندی خودکار بالای 2GB یا زیپ، و آپلود در گیت‌هاب"""
     global pending_zip_mode, pending_zip_password, active_final_filename
 
     work_dir = os.path.dirname(local_path)
     final_clean_name = active_final_filename
     raw_size = os.path.getsize(local_path)
 
-    # ریست کردن وضعیت /zip برای فایل‌های بعدی
     do_zip = pending_zip_mode
     zip_pwd = pending_zip_password
     pending_zip_mode = False
     pending_zip_password = None
 
-    # تغییر نام فایل روی دیسک به نام تمیز نهایی تا داخل زیپ هم نام درستی داشته باشد
     clean_local_path = os.path.join(work_dir, final_clean_name)
     if local_path != clean_local_path:
         shutil.move(local_path, clean_local_path)
@@ -408,7 +399,6 @@ async def process_and_upload_single_target(local_path: str, status_msg: Message)
 
     is_over_2gb = raw_size > CHUNK_SIZE_BYTES
 
-    # اگر کاربر /zip زده بود یا حجم فایل بالای 1900 مگابایت بود -> تبدیل به ZIP (تک یا چندبخشی)
     if do_zip or is_over_2gb:
         files_to_upload = await create_store_zip_volumes(
             [local_path], work_dir, final_clean_name, zip_pwd, is_over_2gb, status_msg
@@ -488,7 +478,7 @@ async def process_and_upload_single_target(local_path: str, status_msg: Message)
 
 
 async def download_external_tool(cmd_list: list[str], work_dir: str, status_msg: Message, label: str) -> str:
-    """اجرای غیرهمزمان ابزارهای دانلود خارجی (megadl, gdown, yt-dlp) با قابلیت لغو"""
+    """اجرای غیرهمزمان ابزارهای دانلود خارجی (megadl, gdown, yt-dlp)"""
     global cancel_requested
     proc = await asyncio.create_subprocess_exec(
         *cmd_list,
@@ -543,7 +533,7 @@ async def download_external_tool(cmd_list: list[str], work_dir: str, status_msg:
 
 
 async def download_url_to_disk(url: str, explicit_name: str | None, job_dir: str, status_msg: Message) -> tuple[str, str]:
-    """دانلود هر نوع لینک (مستقیم، مگا، گوگل درایو، یوتیوب) در پوشه مشخص شده بدون سقف ۲ گیگابایت"""
+    """دانلود هر نوع لینک در پوشه مشخص شده"""
     global active_download_ext, active_final_filename
 
     host = urlparse(url).netloc.lower()
@@ -622,7 +612,7 @@ async def download_url_to_disk(url: str, explicit_name: str | None, job_dir: str
             active_final_filename = build_filename_with_ext(active_final_filename, real_ext)
         return local_path, active_final_filename
 
-    # ۴. لینک مستقیم HTTP/HTTPS (پشتیبانی از فایل‌های بالای ۲ گیگابایت)
+    # ۴. لینک مستقیم HTTP/HTTPS
     parsed_path = unquote(urlparse(url).path)
     orig_name = os.path.basename(parsed_path) or f"url_file_{int(time.time())}.bin"
     initial_name, orig_ext = resolve_initial_filename(orig_name, explicit_name)
@@ -636,8 +626,14 @@ async def download_url_to_disk(url: str, explicit_name: str | None, job_dir: str
         reply_markup=get_cancel_kb()
     )
 
-    async with httpx.AsyncClient(follow_redirects=True, timeout=60) as http:
+    req_headers = dict(BROWSER_HEADERS)
+    if "github.com" in host and GITHUB_TOKEN:
+        req_headers["Authorization"] = f"Bearer {GITHUB_TOKEN}"
+
+    async with httpx.AsyncClient(follow_redirects=True, timeout=60, headers=req_headers) as http:
         async with http.stream("GET", url) as resp:
+            if resp.status_code == 404:
+                raise Exception(f"لینک ارسالی وجود ندارد یا از سرور مبدا حذف شده است (404 Not Found):\n{url}")
             resp.raise_for_status()
             total = int(resp.headers.get("Content-Length", 0))
             current = 0
@@ -680,13 +676,14 @@ async def start_cmd(client: Client, message: Message):
         "📦 **۲. آپلود گروهی و زیپ چندبخشی (`/batch`):**\n"
         "• **حالت اول (بدون فشرده‌سازی):**\n"
         "  `/batch MyCourse`\n"
-        "  تمام فایل‌ها و لینک‌های بعدی را با فرمت اصلی در یک Release واحد آپلود می‌کند (و فقط اگر فایلی بالای ۲ گیگ بود پارت‌بندی می‌شود).\n"
+        "  تمام فایل‌ها و لینک‌های بعدی را با فرمت اصلی در یک Release واحد آپلود می‌کند.\n"
         "• **حالت دوم (تبدیل همه به یک فایل زیپ چندبخشی):**\n"
         "  `/batch zip` *(بدون رمز و با نام خودکار)*\n"
         "  `/batch zip MyArchive` *(بدون رمز و با نام دلخواه)*\n"
         "  `/batch zip 1234 MyArchive` *(با رمز `1234` و نام دلخواه)*\n"
         "  `/batch zip -p 1234` *(با رمز `1234` و نام خودکار)*\n"
-        "• **شروع پردازش صف:** پس از ارسال همه فایل‌ها و لینک‌ها، دستور `/done` را بزنید تا پیش‌نمایش صف نمایش داده شود و عملیات آغاز گردد.\n\n"
+        "• `/pop` : حذف آخرین فایل/لینک اضافه‌شده به صف `/batch`\n"
+        "• `/done` : نمایش پیش‌نمایش صف و شروع دانلود و آپلود گروهی\n\n"
         "🔐 **۳. زیپ کردن تک‌فایل (`/zip`):**\n"
         "• `/zip` *(زیپ کردن فایل بعدی بدون رمز)*\n"
         "• `/zip 1234` *(زیپ کردن فایل بعدی با رمز `1234`)*\n\n"
@@ -704,6 +701,8 @@ async def start_cmd(client: Client, message: Message):
 
 @app.on_message(filters.command("batch") & filters.user(ADMIN_ID))
 async def batch_start_cmd(client: Client, message: Message):
+    global pending_custom_name
+    pending_custom_name = None
     zip_mode, pwd, title = parse_batch_args(message.command[1:])
     batch_state["active"] = True
     batch_state["zip_mode"] = zip_mode
@@ -719,14 +718,25 @@ async def batch_start_cmd(client: Client, message: Message):
         f"🏷 **نام مجموعه:** `{title}`\n"
         f"⚙️ **حالت:** {mode_str}{pw_str}\n\n"
         f"📥 حالا فایل‌ها را فوروارد/ارسال کنید یا لینک‌ها را بفرستید تا در صف قرار بگیرند.\n"
-        f"🚀 در پایان دستور `/done` را بزنید تا پیش‌نمایش صف نمایش داده شده و آپلود شروع شود.\n"
-        f"*(برای لغو، دستور `/cancel` را بزنید)*"
+        f"🚀 در پایان دستور `/done` را بزنید (یا با `/pop` آخرین مورد صف را حذف کنید).\n"
+        f"*(برای لغو کامل، دستور `/cancel` را بزنید)*"
     )
+
+
+@app.on_message(filters.command("pop") & filters.user(ADMIN_ID))
+async def batch_pop_cmd(client: Client, message: Message):
+    if not batch_state["active"] or not batch_state["queue"]:
+        return await message.reply_text("ℹ️ صف گروهی خالی است.")
+    removed = batch_state["queue"].pop()
+    label = removed.get("name") or removed.get("url") or "آیتم"
+    await message.reply_text(f"🗑 آیتم آخر (`{label}`) از صف حذف شد. تعداد باقی‌مانده در صف: `{len(batch_state['queue'])}`")
 
 
 @app.on_message(filters.command("done") & filters.user(ADMIN_ID))
 async def batch_done_cmd(client: Client, message: Message):
-    global cancel_requested, active_final_filename
+    global cancel_requested, active_final_filename, pending_custom_name
+    pending_custom_name = None
+
     if not batch_state["active"]:
         return await message.reply_text("ℹ️ حالت گروهی فعال نیست. برای شروع از `/batch` یا `/batch zip` استفاده کنید.")
 
@@ -741,7 +751,6 @@ async def batch_done_cmd(client: Client, message: Message):
     if not queue:
         return await message.reply_text("📭 صف گروهی خالی بود و بسته شد.")
 
-    # محاسبه پیش‌نمایش صف قبل از شروع
     known_bytes = sum(item.get("size", 0) for item in queue)
     est_parts = max(1, (known_bytes // CHUNK_SIZE_BYTES) + 1) if known_bytes > 0 else "نامشخص (شامل لینک)"
     preview_text = (
@@ -778,34 +787,43 @@ async def batch_done_cmd(client: Client, message: Message):
 
                 try:
                     uploaded_items = []
+                    failed_items = []
                     total_bytes_processed = 0
 
-                    # حالت الف: دانلود همه آیتم‌ها و ساخت آرشیو ZIP یکپارچه (تک یا چندبخشی)
+                    # حالت الف: دانلود همه آیتم‌ها و ساخت آرشیو ZIP یکپارچه
                     if zip_mode:
                         downloaded_paths = []
                         for idx, item in enumerate(queue, 1):
                             if cancel_requested:
                                 raise asyncio.CancelledError()
 
-                            if item["type"] == "tg":
-                                tg_msg: Message = item["msg"]
-                                fname = item["name"]
-                                active_final_filename = fname
-                                fpath = os.path.join(job_dir, f"{idx:02d}_{fname}")
-                                start_t = time.time()
-                                await tg_msg.download(
-                                    file_name=fpath,
-                                    progress=tg_progress_bar,
-                                    progress_args=(client, status_msg, start_t, f"دانلود آیتم {idx} از {len(queue)}...")
-                                )
-                                downloaded_paths.append(fpath)
-                                total_bytes_processed += os.path.getsize(fpath)
-                            else:
-                                fpath, fname = await download_url_to_disk(item["url"], item["name"], job_dir, status_msg)
-                                ranked_path = os.path.join(job_dir, f"{idx:02d}_{fname}")
-                                shutil.move(fpath, ranked_path)
-                                downloaded_paths.append(ranked_path)
-                                total_bytes_processed += os.path.getsize(ranked_path)
+                            try:
+                                if item["type"] == "tg":
+                                    tg_msg: Message = item["msg"]
+                                    fname = item["name"]
+                                    active_final_filename = fname
+                                    fpath = os.path.join(job_dir, f"{idx:02d}_{fname}")
+                                    start_t = time.time()
+                                    await tg_msg.download(
+                                        file_name=fpath,
+                                        progress=tg_progress_bar,
+                                        progress_args=(client, status_msg, start_t, f"دانلود آیتم {idx} از {len(queue)}...")
+                                    )
+                                    downloaded_paths.append(fpath)
+                                    total_bytes_processed += os.path.getsize(fpath)
+                                else:
+                                    fpath, fname = await download_url_to_disk(item["url"], item["name"], job_dir, status_msg)
+                                    ranked_path = os.path.join(job_dir, f"{idx:02d}_{fname}")
+                                    shutil.move(fpath, ranked_path)
+                                    downloaded_paths.append(ranked_path)
+                                    total_bytes_processed += os.path.getsize(ranked_path)
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as item_err:
+                                failed_items.append(f"آیتم {idx}: {str(item_err)[:120]}")
+
+                        if not downloaded_paths:
+                            raise Exception("هیچ‌کدام از آیتم‌های صف قابل دانلود نبودند:\n" + "\n".join(failed_items))
 
                         parts = await create_store_zip_volumes(
                             downloaded_paths, job_dir, title, pwd, False, status_msg
@@ -828,44 +846,51 @@ async def batch_done_cmd(client: Client, message: Message):
                             item_dir = os.path.join(job_dir, f"item_{idx}")
                             os.makedirs(item_dir, exist_ok=True)
 
-                            if item["type"] == "tg":
-                                tg_msg: Message = item["msg"]
-                                fname = item["name"]
-                                active_final_filename = fname
-                                fpath = os.path.join(item_dir, fname)
-                                start_t = time.time()
-                                await tg_msg.download(
-                                    file_name=fpath,
-                                    progress=tg_progress_bar,
-                                    progress_args=(client, status_msg, start_t, f"دانلود فایل {idx} از {len(queue)}...")
-                                )
-                            else:
-                                fpath, fname = await download_url_to_disk(item["url"], item["name"], item_dir, status_msg)
-                                clean_p = os.path.join(item_dir, fname)
-                                if fpath != clean_p:
-                                    shutil.move(fpath, clean_p)
-                                    fpath = clean_p
+                            try:
+                                if item["type"] == "tg":
+                                    tg_msg: Message = item["msg"]
+                                    fname = item["name"]
+                                    active_final_filename = fname
+                                    fpath = os.path.join(item_dir, fname)
+                                    start_t = time.time()
+                                    await tg_msg.download(
+                                        file_name=fpath,
+                                        progress=tg_progress_bar,
+                                        progress_args=(client, status_msg, start_t, f"دانلود فایل {idx} از {len(queue)}...")
+                                    )
+                                else:
+                                    fpath, fname = await download_url_to_disk(item["url"], item["name"], item_dir, status_msg)
+                                    clean_p = os.path.join(item_dir, fname)
+                                    if fpath != clean_p:
+                                        shutil.move(fpath, clean_p)
+                                        fpath = clean_p
 
-                            fsize = os.path.getsize(fpath)
-                            total_bytes_processed += fsize
+                                fsize = os.path.getsize(fpath)
+                                total_bytes_processed += fsize
 
-                            # اگر این فایل داخل صف بالای 1900 مگابایت بود، خودکار پارت‌بندی شود
-                            if fsize > CHUNK_SIZE_BYTES:
-                                parts = await create_store_zip_volumes([fpath], item_dir, fname, pwd, True, status_msg)
-                            else:
-                                parts = [fpath]
+                                if fsize > CHUNK_SIZE_BYTES:
+                                    parts = await create_store_zip_volumes([fpath], item_dir, fname, pwd, True, status_msg)
+                                else:
+                                    parts = [fpath]
 
-                            for part_path in parts:
-                                pname = os.path.basename(part_path)
-                                existing_names = [x[0] for x in uploaded_items]
-                                if pname in existing_names:
-                                    pname = f"{idx:02d}_{pname}"
-                                aid, durl, psize = await upload_asset_to_release(
-                                    http, upload_url, part_path, pname, status_msg, f"(آیتم {idx}/{len(queue)})"
-                                )
-                                uploaded_items.append((pname, durl, psize, aid))
+                                for part_path in parts:
+                                    pname = os.path.basename(part_path)
+                                    existing_names = [x[0] for x in uploaded_items]
+                                    if pname in existing_names:
+                                        pname = f"{idx:02d}_{pname}"
+                                    aid, durl, psize = await upload_asset_to_release(
+                                        http, upload_url, part_path, pname, status_msg, f"(آیتم {idx}/{len(queue)})"
+                                    )
+                                    uploaded_items.append((pname, durl, psize, aid))
+                            except asyncio.CancelledError:
+                                raise
+                            except Exception as item_err:
+                                failed_items.append(f"آیتم {idx}: {str(item_err)[:120]}")
+                            finally:
+                                shutil.rmtree(item_dir, ignore_errors=True)
 
-                            shutil.rmtree(item_dir, ignore_errors=True)
+                        if not uploaded_items:
+                            raise Exception("هیچ‌کدام از آیتم‌های صف آپلود نشدند:\n" + "\n".join(failed_items))
 
                     all_links = [x[1] for x in uploaded_items]
                     links_txt_url = await upload_links_txt_asset(http, upload_url, job_dir, all_links, status_msg)
@@ -885,6 +910,11 @@ async def batch_done_cmd(client: Client, message: Message):
 
             if links_txt_url:
                 lines.append(f"\n📋 **فایل لیست تمام لینک‌ها (links.txt برای IDM):**\n`{links_txt_url}`")
+
+            if failed_items:
+                lines.append("\n⚠️ **موارد رد شده (خطا در دانلود):**")
+                for fl in failed_items:
+                    lines.append(f"• `{fl}`")
 
             lines.append(f"\n🏛 **صفحه ریلیز:** [مشاهده در گیت‌هاب]({release_html_url})")
             lines.append(f"📂 **لینک مخزن (Repo):** `{repo_url}`")
@@ -1073,23 +1103,25 @@ async def search_files_cmd(client: Client, message: Message):
 
 
 async def handle_Incoming_url(message: Message, url: str, explicit_name: str | None):
-    """اگر حالت /batch فعال است لینک را به صف اضافه کن، در غیر این صورت مستقیم دانلود و آپلود کن"""
-    global cancel_requested
+    """افزودن لینک به صف /batch یا دانلود و آپلود فوری آن"""
+    global cancel_requested, pending_custom_name
 
     if batch_state["active"]:
         parsed_path = unquote(urlparse(url).path)
         orig_name = os.path.basename(parsed_path) or f"link_{len(batch_state['queue'])+1}.bin"
+        has_custom = bool(explicit_name or pending_custom_name)
         chosen_name, _ = resolve_initial_filename(orig_name, explicit_name)
         batch_state["queue"].append({
             "type": "url",
             "url": url,
-            "name": chosen_name if explicit_name else None,
+            "name": chosen_name if has_custom else None,
             "size": 0
         })
         return await message.reply_text(
             f"➕ **لینک شماره `{len(batch_state['queue'])}` به صف گروهی «{batch_state['title']}» اضافه شد!**\n"
-            f"🔗 `{url}`\n\n"
-            f"*(لینک/فایل بعدی را بفرستید یا برای شروع عملیات `/done` را بزنید)*",
+            f"🔗 `{url}`\n"
+            f"📄 نام تنظیم‌شده: `{chosen_name if has_custom else 'خودکار'}`\n\n"
+            f"*(مورد بعدی را بفرستید، با `/pop` حذف کنید، یا برای شروع `/done` را بزنید)*",
             disable_web_page_preview=True
         )
 
@@ -1169,7 +1201,6 @@ async def handle_media(client: Client, message: Message):
     allowed_caption = None if is_forwarded else message.caption
     initial_name, orig_ext = resolve_initial_filename(orig_name, allowed_caption)
 
-    # اگر حالت صف /batch فعال باشد، فایل را دانلود نکن؛ فقط به صف اضافه کن
     if batch_state["active"]:
         batch_state["queue"].append({
             "type": "tg",
@@ -1182,7 +1213,7 @@ async def handle_media(client: Client, message: Message):
             f"➕ **فایل شماره `{len(batch_state['queue'])}` به صف «{batch_state['title']}» اضافه شد!**\n"
             f"📄 نام: `{initial_name}` (`{human_size(file_size)}`)\n"
             f"📊 جمع حجم صف تا الان: `{human_size(total_q_size)}`\n\n"
-            f"*(فایل بعدی را بفرستید یا برای شروع عملیات `/done` را بزنید)*"
+            f"*(مورد بعدی را بفرستید، با `/pop` حذف کنید، یا برای شروع `/done` را بزنید)*"
         )
 
     job_dir = os.path.join(DOWNLOAD_DIR, f"tg_{tag_time}")
@@ -1256,7 +1287,7 @@ async def handle_plain_text_or_links(client: Client, message: Message):
             else:
                 return await status.edit_text(f"❌ خطا در تغییر نام: `{resp.status_code}`\n`{resp.text}`")
 
-    # ۲. تشخیص لینک مستقیم، مگا، گوگل درایو، یوتیوب و...
+    # ۲. تشخیص لینک مستقیم، مگا، گوگل درایو، یوتیوب و... (فقط اگر خط اول واقعاً لینک باشد)
     if first_line.startswith("http://") or first_line.startswith("https://"):
         parts = first_line.split(maxsplit=1)
         url = parts[0]
@@ -1276,10 +1307,10 @@ async def handle_plain_text_or_links(client: Client, message: Message):
             f"✏️ **نام فایل در حال دانلود تغییر یافت به:**\n`{new_name}`"
         )
 
-    # ۴. ذخیره نام برای فایل/لینک بعدی
+    # ۴. ذخیره نام برای فایل/لینک بعدی (هم در حالت عادی و هم داخل صف /batch)
     pending_custom_name = sanitize_filename(first_line)
     await message.reply_text(
-        f"📌 **نام `{pending_custom_name}` برای فایل بعدی ذخیره شد!**\n"
+        f"📌 **نام `{pending_custom_name}` برای فایل/لینک بعدی ذخیره شد!**\n"
         f"حالا فایل یا لینک خود را ارسال کنید."
     )
 
